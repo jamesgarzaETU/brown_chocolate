@@ -43,7 +43,8 @@ import scipy
 import pickle
 
 # Import ETU functions
-from skillwell_functions import report, find_ec2, find_rds
+from skillwell_functions import find_ec2, find_rds
+from report import report
 
 
 # Add skillwell_etl to path
