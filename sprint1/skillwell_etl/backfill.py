@@ -19,10 +19,6 @@ from skillwell_functions import *
 # Import from same directory
 from .parquet_pipeline import ParquetPipeline
 
-# Credentials
-credentials = json.load(open("{}/credentials.json".format('/home/ubuntu/etu_appliedsciences/_credentials'), "r"))
-
-
 
 # Configure logging
 logging.basicConfig(
