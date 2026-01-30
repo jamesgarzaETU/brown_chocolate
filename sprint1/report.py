@@ -48,6 +48,26 @@ from datetime import date, timedelta, datetime
 import time
 import html
 from sshtunnel import SSHTunnelForwarder
+
+def get_js_content(filename):
+	"""Reads and returns the content of a JS file from the original_dahsboard directory."""
+	import os
+	# Look in original_dahsboard first, then current dir
+	paths_to_check = [
+		os.path.join(os.path.dirname(__file__), 'original_dahsboard', filename),
+		os.path.join(os.path.dirname(__file__), filename)
+	]
+	
+	for path in paths_to_check:
+		if os.path.exists(path):
+			try:
+				with open(path, 'r', encoding='utf-8') as f:
+					return f.read()
+			except Exception as e:
+				print(f"Error reading {path}: {e}")
+				return f"// Error reading {filename}"
+	
+	return f"// File not found: {filename}"
 import re
 import xml.etree.ElementTree as ET
 import lxml.html
@@ -57,11 +77,145 @@ import os
 import shutil
 from subprocess import call
 import json
+import plotly.express as px
+
+
+# ------------------------------------------------->
+# ----- Helper function for Plotly Express charts ->
+# ------------------------------------------------->
+
+def create_proj_engagement_chart(df, project_name):
+	"""
+	Creates a horizontal bar chart for Learner Engagement by Simulation using Plotly Express.
+
+	Args:
+		df (pandas.DataFrame): The proj_engagement DataFrame
+		project_name (str): The project name to filter by
+
+	Returns:
+		tuple: (chart_json, summary_html) - JSON string with Plotly data/layout and HTML for summary
+	"""
+	import json as json_module
+
+	# Filter data for the selected project
+	filtered_df = df[df['project'].str.strip() == project_name.strip()].copy()
+
+	if filtered_df.empty:
+		return None, "<p>No data available for the selected project.</p>"
+
+	# Get summary stats from first row
+	first_row = filtered_df.iloc[0]
+	total = int(first_row['total'])
+	pct_all = first_row['pct_all_complete']
+	tot_all = int(first_row['total_all_complete'])
+
+	# Create summary HTML
+	summary_html = f'''
+	<p class="component_text">
+		<span style="font-weight:700">{total:,}</span>
+		<span style="font-weight:400"> learners have completed an attempt of </span>
+		<span style="font-weight:700">at least one </span>
+		<span style="font-weight:400">Simulation.</span><br>
+		<span style="font-weight:700">{pct_all:.1f}% ({tot_all:,})</span>
+		<span style="font-weight:400"> of learners have completed </span>
+		<span style="font-weight:700">all </span>
+		<span style="font-weight:400">Sims.</span>
+	</p>
+	'''
+
+	# Create text column for bar labels
+	filtered_df['text_label'] = filtered_df.apply(
+		lambda row: f"{int(row['n']):,} ({row['pct']:.1f}%)", axis=1
+	)
+
+	# Sort by sim_order for consistent display
+	filtered_df = filtered_df.sort_values('sim_order', ascending=True)
+
+	# Create horizontal bar chart
+	fig = px.bar(
+		filtered_df,
+		x='n',
+		y='simname',
+		orientation='h',
+		color='stat',
+		text='text_label',
+		labels={
+			'n': 'Number of Learners',
+			'simname': 'Simulation',
+			'stat': 'Status'
+		},
+		color_discrete_map={stat: filtered_df[filtered_df['stat'] == stat]['bar_color'].iloc[0]
+						   for stat in filtered_df['stat'].unique()}
+	)
+
+	# Update layout
+	fig.update_layout(
+		height=max(300, len(filtered_df['simname'].unique()) * 80 + 100),
+		margin=dict(l=20, r=20, t=30, b=50),
+		yaxis=dict(autorange='reversed'),  # Top-down reading order
+		legend=dict(
+			orientation='h',
+			yanchor='bottom',
+			y=1.02,
+			xanchor='center',
+			x=0.5
+		),
+		font=dict(family='Open Sans, sans-serif'),
+		showlegend=True,
+		barmode='group'
+	)
+
+	# Update bar text position
+	fig.update_traces(textposition='outside')
+
+	# Return JSON data for JavaScript to render with Plotly.newPlot()
+	# Manually build dict with plain Python lists to avoid binary array encoding
+	import numpy as np
+
+	def numpy_to_python(obj):
+		"""Recursively convert numpy types and Plotly objects to Python native types"""
+		if obj is None:
+			return None
+		elif isinstance(obj, np.ndarray):
+			return [numpy_to_python(x) for x in obj.tolist()]
+		elif isinstance(obj, (np.integer,)):
+			return int(obj)
+		elif isinstance(obj, (np.floating,)):
+			return float(obj)
+		elif isinstance(obj, (bool, int, float, str)):
+			return obj
+		elif hasattr(obj, 'to_plotly_json'):
+			# Handle Plotly objects (like ErrorX, Marker, etc.)
+			return numpy_to_python(obj.to_plotly_json())
+		elif isinstance(obj, dict):
+			return {k: numpy_to_python(v) for k, v in obj.items()}
+		elif isinstance(obj, (list, tuple)):
+			return [numpy_to_python(x) for x in obj]
+		return obj
+
+	# Build data array from traces
+	data_list = []
+	for trace in fig.data:
+		trace_dict = {}
+		for key in trace:
+			val = trace[key]
+			trace_dict[key] = numpy_to_python(val)
+		data_list.append(trace_dict)
+
+	# Get layout as dict
+	layout_dict = numpy_to_python(fig.layout.to_plotly_json())
+
+	chart_dict = {'data': data_list, 'layout': layout_dict}
+	chart_json = json_module.dumps(chart_dict)
+
+	return chart_json, summary_html
 
 
 # ------------------------------------------------->
 # ----- Function for creating the HTML Report ----->
 # ------------------------------------------------->
+
+
 
 def report(
 	dict_df,
@@ -105,14 +259,33 @@ def report(
 
 					<!-- JS & CHART LIBRARY -->
 					<script type = "text/javascript" src="d3.v7.min.js"></script>
-					<script type = "text/javascript" src="chart_bar_horizontal.js"></script>
-					<script type = "text/javascript" src="chart_bar_vertical_character.js"></script>
-					<script type = "text/javascript" src="chart_donut.js"></script>
-					<script type = "text/javascript" src="chart_line.js"></script>
-					<script type = "text/javascript" src="chart_polar_mckinsey.js"></script>
-					<script type = "text/javascript" src="createFilterData.js"></script>
-					<script type = "text/javascript" src="chart_drag_drop.js"></script>
-					<script type = "text/javascript" src="createSummaryData.js"></script>
+					<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+
+					<!-- Inline Custom JS -->
+					<script type="text/javascript">
+					''' + get_js_content('chart_bar_horizontal.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('chart_bar_vertical_character.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('chart_donut.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('chart_line.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('chart_polar_mckinsey.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('createFilterData.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('chart_drag_drop.js') + '''
+					</script>
+					<script type="text/javascript">
+					''' + get_js_content('createSummaryData.js') + '''
+					</script>
 				</head>
 
 			'''
@@ -133,6 +306,7 @@ def report(
 
 				<!-- JS & CHART LIBRARY -->
 				<script type = "text/javascript" src="d3.v7.min.js"></script>
+				<script src="plotly-2.27.0.min.js"></script>
 				<script type = "text/javascript" src="chart_bar_horizontal.js"></script>
 				<script type = "text/javascript" src="chart_bar_vertical_character.js"></script>
 				<script type = "text/javascript" src="chart_donut.js"></script>
@@ -1103,6 +1277,7 @@ def report(
 			# Add updateGraphs_sim function to page
 			html_page += '''
 			function updateGraphs_{0}(){{
+				var projSelector = document.getElementById("selectProj");
 
 				if({1}.value != ""){{
 
@@ -1114,265 +1289,157 @@ def report(
 			dmg_selector = 'd["demog_var"] == demogvarSelector.value && d["demog_val"] == demogvalSelector.value && ' if demog_filters is not None else ''
 
 
-
 			for key2 in dict_df[key1]:
 				if key2 == 'learner_engagement':
 					html_page += '''
-					// LEARNER ENGAGEMENT
+					// LEARNER ENGAGEMENT (Vanilla JS + Plotly)
+					try {{
+						var parent = document.getElementById("component_content_learner_engagement");
+						var existing = document.getElementById("contentsub_learner_engagement");
+						if (existing && parent) parent.removeChild(existing);
 
-					d3.select("#contentsub_{0}").remove();
+						var grid = document.createElement("div");
+						grid.id = "contentsub_learner_engagement";
+						grid.style.display = "grid";
+						grid.style.gridTemplateRows = "min-content min-content";
+						grid.style.gridTemplateColumns = "1fr 1fr";
+						grid.style.gridGap = "5px";
+						grid.style.marginBottom = "20px";
+						if (parent) parent.appendChild(grid);
 
-					// --- 2x2 Grid --->
-					d3.select("#component_content_{0}") //d3.select("#component_content_{0}_collapsible")
-					  .append("div")
-					  .attr("id", "contentsub_{0}")
-					  .style("display", "grid")
-					  .style("grid-template-rows", "min-content min-content")
-					  .style("grid-template-columns", "1fr 1fr")
-					  .style("grid-gap", "5px")
-					  .style("margin-bottom", "20px");
+						var ids = [
+							"text_component_learner_engagement_1",
+							"text_component_learner_engagement_2",
+							"chart_component_learner_engagement_1",
+							"chart_component_learner_engagement_2"
+						];
 
-					d3.select("#contentsub_{0}").append("div").attr("class", "grid__item").attr("id", "text_component_{0}_1").style("align-self", "end");
-					d3.select("#contentsub_{0}").append("div").attr("class", "grid__item").attr("id", "text_component_{0}_2").style("align-self", "end");
-					d3.select("#contentsub_{0}").append("div").attr("class", "grid__item").attr("id", "chart_component_{0}_1").style("align-self", "start");
-					d3.select("#contentsub_{0}").append("div").attr("class", "grid__item").attr("id", "chart_component_{0}_2").style("align-self", "start");
+						var styles = ["end", "end", "start", "start"];
 
-					d3.select("#chart_component_{0}_1").selectAll('.svg-container').remove();
+						ids.forEach((id, i) => {{
+							var div = document.createElement("div");
+							div.className = "grid__item";
+							div.id = id;
+							div.style.alignSelf = styles[i];
+							grid.appendChild(div);
+						}});
 
-					if(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value).map(d => d["total"])[0] == 0){{
+						// Helper for number formatting
+						var fmt_le = (n) => n.toLocaleString('en-US', {{maximumFractionDigits: 0}});
+						var fmtPct_le = (n) => n.toLocaleString('en-US', {{minimumFractionDigits: 1, maximumFractionDigits: 1}});
 
-					  // --- First Text Grid Element --->
-					  d3.select("#text_component_{0}_1")
-							.append("p")
-							.attr("class", "component_text");
+						var targetData = data_component_learner_engagement.filter(d => {1} {2} d["simname"] == simSelector.value);
+						var total = (targetData.length > 0) ? targetData[0]["total"] : 0;
+						
+						var t1 = document.getElementById("text_component_learner_engagement_1");
 
-					  d3.select("#text_component_{0}_1").select(".component_text")
-						  .append("text")
-						  .attr("dx", "0em")
-						  .attr("dy", "0em")
-							.append("tspan")
-							  .style("font-weight", 700)
-							  .text("0")
-							.append("tspan")
-							  .style("font-weight", 400)
-							  .text(" learners have engaged with the Simulation.");
-
-					}}
-					else{{
-
-						// --- First Text Grid Element --->
-						d3.select("#text_component_{0}_1")
-							  .append("p")
-							  .attr("class", "component_text");
-
-
-						var sing_plur_{0} = (data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value).map(d => d["total"])[0] == 1)? " learner has ": " learners have ";
-
-						d3.select("#text_component_{0}_1").select(".component_text")
-							.append("text")
-							.attr("dx", "0em")
-							.attr("dy", "0em")
-							  .append("tspan")
-								.style("font-weight", 700)
-								.text(d3.format(",.0f")(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value).map(d => d["total"])[0]))
-							  .append("tspan")
-								.style("font-weight", 400)
-								.text(sing_plur_{0} + "engaged with the Simulation.");
-
-
-						d3.select("#text_component_{0}_1").select(".component_text").append("br");
-						d3.select("#text_component_{0}_1").select(".component_text").append("br");
-
-						var em_val = 1;
-
-
-
-						if(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 1).map(d => d["n"])[0] > 0){{
-
-						  d3.select("#text_component_{0}_1").select(".component_text")
-							  .append("text")
-							  .attr("dx", "0em")
-							  .attr("dy", em_val + "em")
-								.append("tspan")
-								  .style("font-weight", 700)
-								  .text(numFormat(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 1).map(d => d["pct"])[0]) + "% (" + d3.format(",.0f")(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 1).map(d => d["n"])[0]) + ")")
-								.append("tspan")
-								  .style("font-weight", 400)
-								  .text(" of learners have not yet completed their first attempt.").append("br");
-
-						  em_val += 1;
-
-						}}
-
-						d3.select("#text_component_{0}_1").select(".component_text")
-							.append("text")
-							.attr("dx", "0em")
-							.attr("dy", em_val + "em")
-							  .append("tspan")
-								.style("font-weight", 700)
-								.text(numFormat(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 2).map(d => d["pct"])[0]) + "% (" + d3.format(",.0f")(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 2).map(d => d["n"])[0]) + ")")
-							  .append("tspan")
-								.style("font-weight", 400)
-								.text(" of learners have completed an attempt.").append("br");
-
-
-
-						// --- First Chart Grid Element --->
-						chart_donut(
-						  data=data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] <= 2),
-						  html_id="#chart_component_{0}_1",
-
-						  title={{value:null, line:false}},
-
-						  clr={{var:"bar_color", value:null}},
-
-						  facet={{var:null, size:18, weight:400, space_above_title:5, order:"as_appear", ascending:true, line:{{show:false, color:"#d3d2d2"}}}},
-						  group={{var:"stat", label:{{value:null, size:18, weight:700}}, size:14, weight:400, order:"alphabetical", ascending:true, show:false}},
-						  switcher={{var:null, label:{{value:null, size:18, weight:700}}, size:18, weight:400, order:"as_appear", ascending:true, line:false}},
-						  scroll={{var:null, label:{{value:null, size:20, weight:700}}, size:18, weight:400, order:"as_appear", ascending:true, line:false}},
-
-						  value={{
-							var:"pct",
-							max:100,
-							maxScroll:"fixed", // "fixed" or "free"
-							maxFacet:"fixed", // "fixed" or "free"
-						  }},
-
-						  segment_label={{
-							minValue:0.00,
-							text:[
-							  {{size:14, weight:700, text:[{{var:"stat", format:null, prefix:null, suffix:null}}]}},
-							  {{size:14, weight:400, text:[
-								{{var:"pct", format:",.1f", prefix:null, suffix:"%"}},
-								{{var:"n", format:",.0f", prefix:" (", suffix:")"}},
-							  ]}}
-							]
-						  }},
-
-						  tooltip_text=[
-							{{size:16, weight:700, text:[{{var:"stat", format:null, prefix:null, suffix:null}}]}},
-							{{size:16, weight:700, text:[{{var:"pct", format:".1f", prefix:null, suffix:"%"}}]}},
-							{{size:14, weight:400, text:[
-							  {{var:"n", format:",.0f", prefix:null, suffix:null}},
-							  {{var:"total", format:",.0f", prefix:" / ", suffix:null}}
-							]}}
-						  ],
-
-						  inner_circle={{
-							clr:"#d3d2d2",
-							width:0.5, // Value between 0 and 1 representing the percentage width of the outer circle
-							show:true
-						  }},
-
-						  inner_radius=0.8,
-
-						  inner_text=[
-							{{size:40, weight:700, text:[
-							  {{var:"total", aggregate:"max", format:",.0f", prefix:null, suffix:null}},
-							]}},
-							{{size:18, weight:700, text:[{{var:null, aggregate:null, format:null, prefix:"Learners", suffix:null}}]}},
-						  ],
-
-						  yaxis={{
-							height:400,
-							offset:{{top:10, bottom:10}},
-							tick:{{width:100}}
-						  }},
-
-						  font={{family:body_font}},
-
-						  margin={{top:10, bottom:10, left:10, right:10, g:10}},
-
-						  canvas={{width:500}},
-
-						  zoom=false
-						);
-
-
-
-						if(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 3).map(d => d["n"])[0] == 0){{
-
-						  // --- Second Text Grid Element --->
-						  d3.select("#text_component_{0}_2")
-								.append("p")
-								.attr("class", "component_text");
-
-						  d3.select("#text_component_{0}_2").select(".component_text")
-							  .append("text")
-							  .attr("dx", "0em")
-							  .attr("dy", "1em")
-								.append("tspan")
-								  .style("font-weight", 700)
-								  .text("0")
-								.append("tspan")
-								  .style("font-weight", 400)
-								  .text(" learners have completed multiple attempts.").append("br");
-
+						if(total == 0){{
+							t1.innerHTML = '<p class="component_text"><span style="font-weight:700">0</span> <span style="font-weight:400"> learners have engaged with the Simulation.</span></p>';
 						}}
 						else{{
+							var singPlur = (total == 1) ? " learner has " : " learners have ";
+							var html = '<p class="component_text">' +
+									   '<span style="font-weight:700">' + fmt_le(total) + '</span>' +
+									   '<span style="font-weight:400">' + singPlur + 'engaged with the Simulation.</span><br><br>';
+							
+							// Add breakdown text
+							var stat1 = targetData.find(d => d["stat_order"] == 1);
+							if (stat1 && stat1["n"] > 0) {{
+								html += '<span style="font-weight:700">' + fmtPct_le(stat1["pct"]) + '% (' + fmt_le(stat1["n"]) + ')</span>' + 
+										'<span style="font-weight:400"> of learners have not yet completed their first attempt.</span><br>';
+							}}
+							
+							var stat2 = targetData.find(d => d["stat_order"] == 2);
+							if (stat2) {{
+								html += '<span style="font-weight:700">' + fmtPct_le(stat2["pct"]) + '% (' + fmt_le(stat2["n"]) + ')</span>' + 
+										'<span style="font-weight:400"> of learners have completed an attempt.</span><br>';
+							}}
+							
+							html += '</p>';
+							t1.innerHTML = html;
 
-						  // --- Second Text Grid Element --->
-						  d3.select("#text_component_{0}_2")
-								.append("p")
-								.attr("class", "component_text");
+							// --- Plotly Chart ---
+							var plotDataRaw = targetData.filter(d => d["stat_order"] <= 2);
+							var values = plotDataRaw.map(d => d["pct"]);
+							var labels = plotDataRaw.map(d => d["stat"]);
+							var colors = plotDataRaw.map(d => d["bar_color"]);
 
-						  d3.select("#text_component_{0}_2").select(".component_text")
-							  .append("text")
-							  .attr("dx", "0em")
-							  .attr("dy", "1em")
-							  .append("tspan")
-								  .style("font-weight", 700)
-								  .text(numFormat(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 3).map(d => d["pct"])[0]) + "% (" + d3.format(",.0f")(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 3).map(d => d["n"])[0]) + ")")
-							  .append("tspan")
-								  .style("font-weight", 400)
-								  .text(" of learners have completed")
-							  .append("tspan")
-								  .style("font-weight", 700)
-								  .text(" 2 or more")
-							  .append("tspan")
-								  .style("font-weight", 400)
-								  .text(" attempts.").append("br");
+							var data = [{{
+							  values: values,
+							  labels: labels,
+							  marker: {{colors: colors}},
+							  type: 'pie',
+							  hole: 0.6,
+							  textinfo: 'percent',
+							  textposition: 'outside',
+							  hoverinfo: 'label+value+percent',
+							  name: 'Learner Engagement'
+							}}];
 
+							var layout = {{
+							  height: 400,
+							  width: 500,
+							  showlegend: false,
+							  margin: {{t: 20, b: 20, l: 20, r: 20}},
+							  annotations: [
+								{{
+								  font: {{
+									size: 40,
+									weight: 700,
+                                family: body_font
+								  }},
+								  showarrow: false,
+								  text: fmt_le(total),
+								  x: 0.5,
+								  y: 0.55
+								}},
+								{{
+								  font: {{
+									size: 14,
+                                family: body_font
+								  }},
+								  showarrow: false,
+								  text: "Learners",
+								  x: 0.5,
+								  y: 0.45
+								}}
+							  ]
+							}};
 
-						  d3.select("#text_component_{0}_2").select(".component_text")
-							  .append("text")
-							  .attr("dx", "0em")
-							  .attr("dy", "2em")
-							  .append("tspan")
-								  .style("font-weight", 700)
-								  .text(numFormat(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 4).map(d => d["pct"])[0]) + "% (" + d3.format(",.0f")(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 4).map(d => d["n"])[0]) + ")")
-							  .append("tspan")
-								  .style("font-weight", 400)
-								  .text(" of learners have completed")
-							  .append("tspan")
-								  .style("font-weight", 700)
-								  .text(" 3 or more")
-							  .append("tspan")
-								  .style("font-weight", 400)
-								  .text(" attempts.").append("br");
+							Plotly.newPlot('chart_component_learner_engagement_1', data, layout);
 
+							// --- Second Text Grid Element ---
+							var t2 = document.getElementById("text_component_learner_engagement_2");
+							var html2 = '<p class="component_text">';
+							
+							var stat3 = targetData.find(d => d["stat_order"] == 3);
+							if (!stat3 || stat3["n"] == 0) {{
+								html2 += '<span style="font-weight:700">0</span> <span style="font-weight:400"> learners have completed multiple attempts.</span><br>';
+							}} else {{
+								html2 += '<span style="font-weight:700">' + fmtPct_le(stat3["pct"]) + '% (' + fmt_le(stat3["n"]) + ')</span>' +
+										 '<span style="font-weight:400"> of learners have completed </span>' +
+										 '<span style="font-weight:700">2 or more</span>' +
+										 '<span style="font-weight:400"> attempts.</span><br>';
+										 
+								var stat4 = targetData.find(d => d["stat_order"] == 4);
+								if (stat4) {{
+									html2 += '<span style="font-weight:700">' + fmtPct_le(stat4["pct"]) + '% (' + fmt_le(stat4["n"]) + ')</span>' +
+											 '<span style="font-weight:400"> of learners have completed </span>' +
+											 '<span style="font-weight:700">3 or more</span>' +
+											 '<span style="font-weight:400"> attempts.</span><br>';
+								}}
+								
+								var stat5 = targetData.find(d => d["stat_order"] == 5);
+								if (stat5) {{
+									html2 += '<span style="font-weight:700">' + fmtPct_le(stat5["pct"]) + '% (' + fmt_le(stat5["n"]) + ')</span>' +
+											 '<span style="font-weight:400"> of learners have completed </span>' +
+											 '<span style="font-weight:400">4 or more</span>' +
+											 '<span style="font-weight:400"> attempts.</span><br>';
+								}}
+							}}
+							html2 += '</p>';
+							t2.innerHTML = html2;
 
-						  d3.select("#text_component_{0}_2").select(".component_text")
-							  .append("text")
-							  .attr("dx", "0em")
-							  .attr("dy", "3em")
-							   .append("tspan")
-								   .style("font-weight", 700)
-								   .text(numFormat(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 5).map(d => d["pct"])[0]) + "% (" + d3.format(",.0f")(data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] == 5).map(d => d["n"])[0]) + ")")
-							   .append("tspan")
-								   .style("font-weight", 400)
-								   .text(" of learners have completed")
-							   .append("tspan")
-								   .style("font-weight", 700)
-								   .text(" 4 or more")
-							   .append("tspan")
-								   .style("font-weight", 400)
-								   .text(" attempts.").append("br");
-
-
-
-							// --- Second Chart Grid Element --->
-							d3.select("#chart_component_{0}_2").selectAll('.svg-container').remove();
 							chart_bar_vertical_character(
 							  data=data_component_{0}.filter(d => {1} {2} d["simname"] == simSelector.value && d["stat_order"] >= 3),
 							  html_id="#chart_component_{0}_2",
@@ -1450,6 +1517,8 @@ def report(
 							  zoom=false
 							);
 						}}
+					}} catch (e) {{
+						console.error("Error in Learner Engagement Chart:", e);
 					}}
 
 
@@ -1477,7 +1546,6 @@ def report(
 					d3.select("#contentsub_{0}").append("div").attr("id", "text_component_{0}_1").style("align-self", "end");
 					d3.select("#contentsub_{0}").append("div").attr("id", "chart_component_{0}_1").style("align-self", "start");
 
-					// --- First Text Grid Element --->
 					d3.select("#text_component_{0}_1")
 						  .append("p")
 						  .attr("class", "component_text");
@@ -2242,8 +2310,6 @@ def report(
 
 
 					'''.format(key2, proj_selector, dmg_selector)
-
-
 
 
 
@@ -3630,160 +3696,116 @@ def report(
 					'''.format(key2, proj_selector, dmg_selector, srv_comment_limit)
 
 				if key2 == 'proj_engagement':
+					# Generate Plotly Express charts server-side for each project
+					proj_engagement_df = dict_df['proj']['proj_engagement']
+					unique_projects = proj_engagement_df['project'].str.strip().unique()
+
+					# Generate chart data for each project
+					proj_chart_data = {}
+					proj_summary_html = {}
+					for proj_name in unique_projects:
+						chart_json, summary_html = create_proj_engagement_chart(proj_engagement_df, proj_name)
+						proj_chart_data[proj_name] = chart_json
+						proj_summary_html[proj_name] = summary_html
+
+					# Convert to JSON for JavaScript
+					import json
+					chart_data_js = json.dumps(proj_chart_data)
+					summary_html_js = json.dumps(proj_summary_html)
+
 					html_page += '''
-					// PROJECT - LEARNER ENGAGEMENT
+					// PROJECT - LEARNER ENGAGEMENT (Plotly Express - Server-side rendered)
+					try {{
+						console.log("Setting up Project Engagement chart display");
+						var parent = document.getElementById("component_content_{0}");
+						var existing = document.getElementById("contentsub_{0}");
+						if (existing && parent) parent.removeChild(existing);
 
-					d3.select("#contentsub_{0}").remove();
+						var grid = document.createElement("div");
+						grid.id = "contentsub_{0}";
+						grid.style.display = "grid";
+						grid.style.gridTemplateRows = "min-content min-content";
+						grid.style.gridTemplateColumns = "1fr";
+						grid.style.gridGap = "5px";
+						if (parent) parent.appendChild(grid);
 
-					// --- 2x1 Grid --->
-					d3.select("#component_content_{0}") //d3.select("#component_content_{0}_collapsible")
-					  .append("div")
-					  .attr("id", "contentsub_{0}")
-					  .style("display", "grid")
-					  .style("grid-template-rows", "min-content min-content")
-					  .style("grid-template-columns", "1fr")
-					  .style("grid-gap", "5px");
+						// Create text and chart divs
+						var textDiv = document.createElement("div");
+						textDiv.id = "text_component_{0}_1";
+						textDiv.style.alignSelf = "end";
+						grid.appendChild(textDiv);
 
-					d3.select("#contentsub_{0}").append("div").attr("id", "text_component_{0}_1").style("align-self", "end");
-					d3.select("#contentsub_{0}").append("div").attr("id", "chart_component_{0}_1").style("align-self", "start");
+						var chartDiv = document.createElement("div");
+						chartDiv.id = "chart_component_{0}_1";
+						chartDiv.style.alignSelf = "start";
+						chartDiv.style.width = "100%";
+						chartDiv.style.minHeight = "300px";
+						grid.appendChild(chartDiv);
 
-					d3.select("#chart_component_{0}_1").selectAll('.svg-container').remove();
+						// Store chart data from Python (Plotly Express)
+						var projEngagementChartData = {1};
+						var projEngagementSummaryHtml = {2};
 
+						// Function to render chart for selected project
+						// Function to render chart for selected project
+						window.renderProjEngagementChart = function() {{
+							var projSelector = document.getElementById("selectProj");
+							if (!projSelector) {{
+								console.error("Project selector 'selectProj' not found!");
+								return;
+							}}
+							
+							var selectedProj = projSelector.value ? projSelector.value.trim() : "";
+							console.log("Rendering Chart. Selected Project:", selectedProj);
+							console.log("Available Projects in Data:", Object.keys(projEngagementChartData));
 
+							// Update summary text
+							if (projEngagementSummaryHtml[selectedProj]) {{
+								textDiv.innerHTML = projEngagementSummaryHtml[selectedProj];
+							}} else {{
+								console.warn("No summary HTML found for project:", selectedProj);
+							}}
 
-					// --- First Text Grid Element --->
-					d3.select("#text_component_{0}_1")
-						.append("p")
-						.attr("class", "component_text");
+							// Render Plotly chart
+							if (projEngagementChartData[selectedProj]) {{
+								console.log("Found chart data for project. Rendering...");
+								try {{
+									var chartSpec = JSON.parse(projEngagementChartData[selectedProj]);
+									Plotly.newPlot(chartDiv.id, chartSpec.data, chartSpec.layout, {{responsive: true}});
+								}} catch (e) {{
+									console.error("Error parsing or plotting chart data:", e);
+								}}
+							}} else {{
+								console.warn("No chart data found for project:", selectedProj);
+								// Debug: print available keys again if mismatch
+								console.log("Keys available:", Object.keys(projEngagementChartData));
+								console.log("Key looked for:", selectedProj);
+								console.log("Comparison result:", Object.keys(projEngagementChartData).includes(selectedProj));
+							}}
+						}};
 
-					d3.select("#text_component_{0}_1").select(".component_text")
-					  .append("text")
-					  .attr("dx", "0em")
-					  .attr("dy", "0em")
-						.append("tspan")
-						  .style("font-weight", 700)
-						  .text(d3.format(",.0f")(data_component_{0}.filter(d => {1} d["project"] == projSelector.value).map(d => d["total"])[0]))
-						.append("tspan")
-						  .style("font-weight", 400)
-						  .text(" learners have completed an attempt of ")
-						.append("tspan")
-						  .style("font-weight", 700)
-						  .text("at least one ")
-						.append("tspan")
-						  .style("font-weight", 400)
-						  .text("Simulation.");
+						// Render initial chart
+						// Wait for DOM content to be loaded just in case, though this script is likely at end of body
+						if (document.readyState === 'loading') {{
+							document.addEventListener('DOMContentLoaded', window.renderProjEngagementChart);
+						}} else {{
+							window.renderProjEngagementChart();
+						}}
 
-					d3.select("#text_component_{0}_1").select(".component_text").append("br");
+						// Alias for compatibility
+						window.updateProjEngagementChart = window.renderProjEngagementChart;
+						
+						// Add event listener to dropdown if not already handled elsewhere (it seems handled by onchange in HTML)
+						var projSelector = document.getElementById("selectProj");
+						if (projSelector) {{
+							projSelector.addEventListener('change', window.renderProjEngagementChart);
+						}}
 
-					d3.select("#text_component_{0}_1").select(".component_text")
-						.append("text")
-						.attr("dx", "0em")
-						.attr("dy", "0em")
-							.append("tspan")
-								.style("font-weight", 700)
-								.text(d3.format(",.1f")(data_component_{0}.filter(d => {1} d["project"] == projSelector.value).map(d => d["pct_all_complete"])[0]) + "% (" + d3.format(",.0f")(data_component_{0}.filter(d => {1} d["project"] == projSelector.value).map(d => d["total_all_complete"])[0]) + ")")
-							.append("tspan")
-								.style("font-weight", 400)
-								.text(" of learners have completed ")
-							.append("tspan")
-								.style("font-weight", 700)
-								.text("all ")
-							.append("tspan")
-								.style("font-weight", 400)
-								.text("Sims.");
-
-
-
-					if(data_component_{0}.filter(d => {1} d["project"] == projSelector.value).map(d => d["total"])[0] > 0){{
-
-						d3.select("#chart_component_{0}_1").selectAll('.svg-container').remove();
-						chart_bar_horizontal(
-						  data=data_component_{0}.filter(d => {1} d["project"] == projSelector.value),
-						  html_id="#chart_component_{0}_1",
-
-						  x={{var:"n", ascending:true, ci:[null, null]}}, // Must be numeric
-						  y={{var:"simname", order:"as_appear", ascending:true}}, // Must be categorical
-
-						  title={{value:null, line:false}},
-
-						  clr={{var:"bar_color", value:null}}, // Variable containing color of bar(s) or value to set all bars to same color
-						  opacity={{var:null, value:1.0}}, // Variable containing opacity of bar(s) or value to set all bars to same opacity
-
-						  facet={{var:null, size:18, weight:400, space_above_title:5, order:"as_appear", ascending:true, line:{{show:false, color:"#d3d2d2"}}}},
-						  group={{var:"stat", label:{{value:null, size:18, weight:700}}, size:14, weight:400, order:"as_appear", ascending:true, show:true}},
-						  switcher={{var:null, label:{{value:null, size:18, weight:700}}, size:18, weight:400, order:"as_appear", ascending:true, line:false}},
-						  scroll={{var:null, label:{{value:null, size:20, weight:700}}, size:18, weight:400, order:"as_appear", ascending:true, line:false}},
-
-						  bar={{
-							size:12, weight:400,
-							text:[
-								{{var:"n", format:",.0f", prefix:null, suffix:null}},
-								{{var:"pct", format:",.1f", prefix:"(", suffix:"%)"}},
-							],
-							extra_height:0,
-							space_between:10
-						  }},
-
-						  tooltip_text=[
-							{{size:16, weight:700, text:[{{var:"simname", format:null, prefix:null, suffix:null}}]}},
-							{{size:8, weight:700, text:[{{var:null, format:null, prefix:null, suffix:null}}]}},
-							{{size:14, weight:700, text:[{{var:"n", format:",.0f", prefix:null, suffix:" Learners"}}]}},
-							{{size:14, weight:400, text:[{{var:"pct", format:",.1f", prefix:"(", suffix:"%)"}}]}}
-						  ],
-
-						  barmode="group", // "group", "stack" or "overlay"
-
-						  column_data = {{
-							before_x:null,
-							after_x:null
-						  }},
-
-						  vline={{
-							var:null,
-							value:null
-						  }},
-
-						  xaxis={{
-							range: [0, null],
-							rangeScroll:"fixed", // "fixed" or "free"
-							rangeFacet:"fixed", // "fixed" or "free"
-							format:",.0f",
-							suffix:null,
-							tick:{{size:10, weight:400, orientation:"h", splitWidth:150}},
-							label:{{value:"Number of Learners", size:14, weight:700}},
-							offset:{{left:10, right:10}},
-							show:true,
-							show_line:false,
-							show_ticks:true,
-							num_ticks:Math.min(7, (d3.max(data_component_{0}.filter(d => {1} d["project"] == projSelector.value).map(d => d["n"])))+1),
-							show_grid:true
-						  }},
-
-						  yaxis={{
-							widthPct:{{value:0.4, range:"free"}},
-							rangeScroll:"fixed", // "fixed" or "free"
-							rangeFacet:"fixed", // "fixed" or "free"
-							tick:{{size:14, weight:700}},
-							label:{{value:"Simulation", size:14, weight:700}},
-							offset:{{top:0, bottom:10}},
-							show:true,
-							show_line:false,
-							show_ticks:false,
-						  }},
-
-						  font={{family:body_font}},
-
-						  margin={{top:10, bottom:10, left:10, right:10, g:10}},
-
-						  canvas={{width:1000}},
-
-						  zoom=false
-						);
-
+					}} catch(e) {{
+						console.error("Error in Project Engagement Chart:", e);
 					}}
 
-
-					'''.format(key2, dmg_selector)
+					'''.format(key2, chart_data_js, summary_html_js)
 
 				
 				if key2 == 'proj_engagement_over_time':
@@ -6362,6 +6384,11 @@ def report(
 			assignOptions(proj_sims, simSelector);
 
 			updateGraphs_proj();
+
+			// Update Plotly Express chart visibility
+			if (typeof updateProjEngagementChart === 'function') {
+				updateProjEngagementChart();
+			}
 		'''
 
 		if len(dict_df['sim']) > 0:
